@@ -1,0 +1,322 @@
+import { useState, useEffect } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
+import {
+  Dialog,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Building2,
+  Coins,
+  ArrowUpFromLine,
+  Trophy,
+} from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+
+/**
+ * Elevator Miner v5 – personnages animés + ascenseur sprite 🌟
+ * ------------------------------------------------------------
+ * Assets (place-holders gratuits, remplacez-les par vos propres PNG/GIF 32×32) :
+ *   /sprites/miner_idle.png   (4 frames horz) – perso en attente
+ *   /sprites/miner_pick.png   (4 frames horz) – perso qui mine
+ *   /sprites/elevator.png     – cabine 64×48 (porte fermée)
+ *   /sprites/elevator_open.png – cabine portes ouvertes
+ *
+ * L'ascenseur se déplace comme avant, mais on affiche la cabine sprite.
+ * Chaque étage débloqué montre un mineur qui passe d'IDLE → PICK quand la benne dépasse 5 or.
+ * Collected ➜ mineur lève la main puis reprend.
+ *
+ * Le reste (leaderboard, logique) inchangé.
+ */
+
+// ========= CONFIG ========= //
+const API_URL = "https://api.example.com/leaderboard";
+const MAX_FLOORS = 12;
+const TICK = 1000;
+const UNLOCK = 50;
+const UPG = 40;
+const GOLD_BASE = 1;
+const HEIGHT_POW = 1.25;
+
+// ========= LOCAL STORAGE ========= //
+const KEY = "elevMinerV5";
+const load = () => {
+  try {
+    return JSON.parse(localStorage.getItem(KEY) || "null") || null;
+  } catch {
+    return null;
+  }
+};
+const save = (d) => localStorage.setItem(KEY, JSON.stringify(d));
+
+// ========= SPRITE COMPONENTS ========= //
+function Miner({ active }) {
+  // active true => pickaxe anim, else idle
+  return (
+    <div
+      className={`w-8 h-8 bg-[length:256px_32px] animate-[minerIdle_0.8s_steps(4)_infinite] ${
+        active ? "active" : ""
+      }`}
+      style={{ backgroundImage: `url('/sprites/${active ? "miner_pick.png" : "miner_idle.png"}')` }}
+    />
+  );
+}
+
+function ElevatorCabin({ y }) {
+  return (
+    <motion.img
+      src="/sprites/elevator.png"
+      alt="cabine"
+      animate={{ translateY: `${y}%` }}
+      transition={{ type: "spring", stiffness: 120, damping: 15 }}
+      className="w-12 h-9 drop-shadow-lg"
+    />
+  );
+}
+
+// ========= APP ========= //
+export default function ElevatorMinerGame() {
+  const s = load();
+  const [gold, setGold] = useState(s?.gold ?? 0);
+  const [best, setBest] = useState(s?.best ?? 0);
+  const [floors, setFloors] = useState(
+    s?.floors ??
+      Array.from({ length: MAX_FLOORS }, (_, i) => ({
+        unlocked: i === 0,
+        level: i === 0 ? 1 : 0,
+        stored: 0,
+        pose: "idle", // idle | pick
+      }))
+  );
+  const [lift, setLift] = useState(0);
+  const [board, setBoard] = useState([]);
+  const [dlg, setDlg] = useState(false);
+  const [coinsFx, setCoinsFx] = useState([]);
+
+  // production loop
+  useEffect(() => {
+    const id = setInterval(() => {
+      setFloors((p) =>
+        p.map((f, idx) => {
+          if (!f.unlocked) return f;
+          const inc = GOLD_BASE * f.level * HEIGHT_POW ** idx;
+          const nextStored = f.stored + inc;
+          return {
+            ...f,
+            stored: nextStored,
+            pose: nextStored > 5 ? "pick" : "idle",
+          };
+        })
+      );
+    }, TICK);
+    return () => clearInterval(id);
+  }, []);
+
+  // persist
+  useEffect(() => save({ gold, best, floors }), [gold, best, floors]);
+
+  // leaderboard fetch
+  useEffect(() => {
+    if (!dlg) return;
+    fetch(API_URL)
+      .then((r) => r.json())
+      .then((d) => setBoard(d.slice(0, 30)))
+      .catch(() => setBoard([]));
+  }, [dlg]);
+
+  // collect
+  const collect = () => {
+    const total = floors.reduce((s, f) => s + f.stored, 0);
+    if (!total) return;
+
+    // coins fx
+    setCoinsFx(
+      floors
+        .map((f, idx) => ({ idx, stored: f.stored }))
+        .filter((f) => f.stored > 0)
+        .map((f) => ({ id: crypto.randomUUID(), idx: f.idx }))
+    );
+    setTimeout(() => setCoinsFx([]), 900);
+
+    setGold((g) => g + Math.floor(total));
+    setFloors((p) =>
+      p.map((f) => ({ ...f, stored: 0, pose: "idle" }))
+    );
+
+    if (total + gold > best) {
+      setBest(total + gold);
+      const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
+      const username = user?.username || user?.first_name || "Anon";
+      fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, score: total + gold }),
+      }).catch(() => {});
+    }
+
+    // lift anim
+    setLift(100);
+    setTimeout(() => setLift(0), 100);
+    setTimeout(() => setLift(100), 700);
+  };
+
+  // unlock / upgrade
+  const unlock = (idx) => {
+    const cost = UNLOCK * 2 ** idx;
+    if (gold < cost) return;
+    setGold(gold - cost);
+    setFloors((p) => p.map((f, i) => (i === idx ? { ...f, unlocked: true, level: 1 } : f)));
+  };
+  const upgrade = (idx) => {
+    const cost = UPG * floors[idx].level * (idx + 1);
+    if (gold < cost) return;
+    setGold(gold - cost);
+    setFloors((p) => p.map((f, i) => (i === idx ? { ...f, level: f.level + 1 } : f)));
+  };
+
+  // ========= RENDER ========= //
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-sky-200 via-amber-100 to-yellow-50 overflow-hidden relative">
+      {/* flying coins */}
+      <AnimatePresence>
+        {coinsFx.map((c) => (
+          <motion.div
+            key={c.id}
+            initial={{
+              position: "fixed",
+              x: 90,
+              y: window.innerHeight - 140 - c.idx * 60,
+              scale: 0.7,
+            }}
+            animate={{ x: 160, y: 20, scale: 0.3, opacity: 0 }}
+            transition={{ duration: 0.9, ease: "easeIn" }}
+            className="text-yellow-400 drop-shadow-md"
+          >
+            💰
+          </motion.div>
+        ))}
+      </AnimatePresence>
+
+      <div className="mx-auto p-4 pt-8 max-w-md relative z-10">
+        {/* header */}
+        <h1 className="text-4xl font-extrabold flex items-center gap-2 justify-center mb-6 drop-shadow-lg">
+          <Building2 className="w-9 h-9" /> Elevator Miner
+        </h1>
+        <div className="flex justify-between items-center mb-4">
+          <motion.div
+            animate={{ scale: [1, 1.1, 1] }}
+            transition={{ repeat: Infinity, repeatDelay: 4, duration: 2 }}
+            className="flex items-center gap-1 text-xl font-semibold drop-shadow"
+          >
+            <Coins className="w-6 h-6" /> {Math.floor(gold)}
+          </motion.div>
+          <div className="flex gap-2">
+            <Button onClick={collect} className="flex items-center gap-1 shadow-lg">
+              <ArrowUpFromLine className="w-5 h-5" /> Collecte
+            </Button>
+            <Dialog open={dlg} onOpenChange={setDlg}>
+              <DialogTrigger asChild>
+                <Button variant="outline" className="flex items-center gap-1 shadow">
+                  <Trophy className="w-5 h-5" /> Top
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="backdrop-blur-lg">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Trophy className="w-6 h-6" /> Classement
+                  </DialogTitle>
+                </DialogHeader>
+                <ol className="mt-4 space-y-1 max-h-72 overflow-y-auto pr-2">
+                  {board.length ? (
+                    board.map((r, i) => (
+                      <li key={i} className="flex justify-between text-sm">
+                        <span className="font-medium">{i + 1}. {r.username}</span>
+                        <span>{r.score}</span>
+                      </li>
+                    ))
+                  ) : (
+                    <p className="text-center text-sm text-muted-foreground">Pas de données</p>
+                  )}
+                </ol>
+                <p className="text-xs text-right text-muted-foreground mt-3">Votre record : {best}</p>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </div>
+
+        {/* shaft + floors */}
+        <div className="relative flex gap-4">
+          {/* shaft */}
+          <div className="w-14 bg-gray-300/70 rounded-t-xl rounded-b-sm overflow-hidden flex flex-col justify-end shadow-inner">
+            <ElevatorCabin y={lift} />
+          </div>
+          {/* floors */}
+          <div className="flex-1 space-y-4 pb-10">
+            {floors
+              .map((f, idx) => ({ ...f, idx }))
+              .reverse()
+              .map((fl) => (
+                <FloorCard key={fl.idx} d={fl} gold={gold} unlock={unlock} upgrade={upgrade} />
+              ))}
+          </div>
+        </div>
+        <p className="text-center text-xs text-muted-foreground mt-6">
+          Sprites © itch.io – remplacez par vos assets • Classement via API
+        </p>
+      </div>
+
+      {/* keyframes style */}
+      <style>{`
+        @keyframes minerIdle { from { background-position:0 0 } to { background-position:-128px 0 } }
+        .active { animation: minerIdle 0.4s steps(4) infinite; }
+      `}</style>
+    </div>
+  );
+}
+
+// ========= FloorCard ========= //
+function FloorCard({ d, gold, unlock, upgrade }) {
+  const rate = d.unlocked ? GOLD_BASE * d.level * HEIGHT_POW ** d.idx : 0;
+  const unlockCost = UNLOCK * 2 ** d.idx;
+  const upgCost = UPG * d.level * (d.idx + 1);
+
+  return (
+    <Card className="backdrop-blur-md bg-white/40 border border-white/30 shadow-xl">
+      <CardContent className="p-3 flex items-center gap-3">
+        {/* sprite */}
+        {d.unlocked ? <Miner active={d.pose === "pick"} /> : <div className="w-8 h-8 opacity-20" />}
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold truncate">
+            {d.idx === 0 ? "RDC" : `Étage ${d.idx}`}
+          </p>
+          {d.unlocked ? (
+            <>
+              <p className="text-xs text-muted-foreground mb-1 truncate">
+                Lv {d.level} • {rate.toFixed(1)} /s
+              </p>
+              <Progress value={(d.level / 10) * 100} className="h-1" />
+              {d.stored > 0 && (
+                <span className="text-xs">⛏️ {Math.floor(d.stored)}</span>
+              )}
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">Verrouillé</p>
+          )}
+        </div>
+        {d.unlocked ? (
+          <Button size="sm" onClick={() => upgrade(d.idx)} disabled={gold < upgCost} className="shadow">
+            Upg.
+          </Button>
+        ) : (
+          <Button size="sm" onClick={() => unlock(d.idx)} disabled={gold < unlockCost} className="shadow">
+            🔓
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
